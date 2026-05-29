@@ -65,8 +65,17 @@ func New(opts Options) *Limiter {
 // per-request limit configurations: the caller decides which policy applies and
 // the Limiter enforces it for that key. If the policy for an existing key
 // changes, the new rate is adopted and any surplus tokens are clamped to the
-// new capacity.
+// new capacity. An invalid rate (non-positive capacity or interval) fails
+// closed: the request is denied and no bucket is created.
 func (l *Limiter) Allow(key string, rate Rate) Decision {
+	// Defensive backstop: an invalid rate must never silently disable limiting.
+	// A zero Interval would otherwise divide to +Inf tokens and let everything
+	// through, so we fail closed and store no bucket. Supplying a valid Rate
+	// remains the caller's responsibility (see Rate.Validate).
+	if rate.Validate() != nil {
+		return Decision{Allowed: false}
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

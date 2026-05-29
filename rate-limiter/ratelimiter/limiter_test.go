@@ -96,6 +96,70 @@ func TestLimiter_ConcurrentAllow_NoOverAdmission(t *testing.T) {
 	}
 }
 
+func TestLimiter_InvalidRateFailsClosed(t *testing.T) {
+	lim := newTestLimiter(NewManualClock(base))
+	defer lim.Close()
+
+	// A zero Interval previously divided to +Inf tokens and let everything
+	// through. It must now be denied, and must not leave a bucket behind.
+	if lim.Allow("a", Rate{Capacity: 5, Interval: 0}).Allowed {
+		t.Fatal("rate with zero interval must fail closed (deny), not bypass the limiter")
+	}
+	if lim.Allow("b", Rate{Capacity: 0, Interval: time.Second}).Allowed {
+		t.Fatal("rate with zero capacity must be denied")
+	}
+	if got := lim.Len(); got != 0 {
+		t.Fatalf("invalid rates should not create buckets: Len = %d, want 0", got)
+	}
+}
+
+func TestLimiter_AdoptsSmallerRateClampsTokens(t *testing.T) {
+	lim := newTestLimiter(NewManualClock(base))
+	defer lim.Close()
+
+	big := Rate{Capacity: 10, Interval: time.Second}
+	if d := lim.Allow("a", big); d.Remaining != 9 {
+		t.Fatalf("Remaining = %d, want 9 under the large rate", d.Remaining)
+	}
+
+	// Switching to a smaller capacity must clamp the surplus 9 tokens down to the
+	// new capacity of 2 before consuming one, leaving 1.
+	small := Rate{Capacity: 2, Interval: time.Second}
+	if d := lim.Allow("a", small); d.Remaining != 1 {
+		t.Fatalf("Remaining = %d, want 1 after clamping tokens to the smaller capacity", d.Remaining)
+	}
+}
+
+func TestLimiter_CloseIsIdempotent(t *testing.T) {
+	lim := New(Options{SweepInterval: 5 * time.Millisecond})
+
+	if err := lim.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := lim.Close(); err != nil {
+		t.Fatalf("second Close should be a no-op: %v", err)
+	}
+}
+
+// TestLimiter_JanitorEvictsInBackground exercises the real janitor goroutine
+// (not sweep() directly): with a live clock and a fast sweep, an idle bucket is
+// removed on its own. Uses a generous deadline to stay non-flaky.
+func TestLimiter_JanitorEvictsInBackground(t *testing.T) {
+	lim := New(Options{SweepInterval: 5 * time.Millisecond})
+	defer lim.Close()
+
+	lim.Allow("a", Rate{Capacity: 1, Interval: 10 * time.Millisecond})
+
+	deadline := time.After(2 * time.Second)
+	for lim.Len() != 0 {
+		select {
+		case <-deadline:
+			t.Fatal("janitor did not evict the idle bucket within 2s")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func TestLimiter_EvictsOnlyFullyRefilledBuckets(t *testing.T) {
 	clk := NewManualClock(base)
 	lim := newTestLimiter(clk)

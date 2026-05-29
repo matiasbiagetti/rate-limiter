@@ -30,6 +30,12 @@ type Config struct {
 	Policy PolicyFunc
 	// Key extracts the limiting key. Optional; defaults to ClientIP.
 	Key KeyFunc
+	// OnDenied writes the response for a rejected request. It is optional and
+	// defaults to a plain-text 429. When it runs, the X-RateLimit-* and
+	// Retry-After headers are already set on the ResponseWriter, so a custom
+	// handler can read them (e.g. to echo Retry-After into a JSON body) and
+	// only needs to choose a status/body.
+	OnDenied http.Handler
 }
 
 // Configuration errors. These are programmer errors caught at startup, which is
@@ -52,6 +58,9 @@ func New(cfg Config) (func(http.Handler) http.Handler, error) {
 	if cfg.Key == nil {
 		cfg.Key = ClientIP
 	}
+	if cfg.OnDenied == nil {
+		cfg.OnDenied = http.HandlerFunc(writeDefaultDenied)
+	}
 
 	mw := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,13 +73,19 @@ func New(cfg Config) (func(http.Handler) http.Handler, error) {
 
 			if !d.Allowed {
 				h.Set("Retry-After", strconv.Itoa(retryAfterSeconds(d)))
-				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				cfg.OnDenied.ServeHTTP(w, r)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
 	return mw, nil
+}
+
+// writeDefaultDenied is the fallback rejection response: a plain-text 429. The
+// rate-limit and Retry-After headers have already been set by the middleware.
+func writeDefaultDenied(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 }
 
 // retryAfterSeconds converts the Decision's RetryAfter to whole seconds, rounded

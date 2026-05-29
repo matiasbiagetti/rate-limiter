@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,47 @@ func TestMiddleware_LimitsPerClientIP(t *testing.T) {
 	}
 	if rec := call(h, "10.0.0.1"); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("client A second request: code %d, want 429", rec.Code)
+	}
+}
+
+func TestMiddleware_OnDeniedCustomisesRejection(t *testing.T) {
+	lim := ratelimiter.New(ratelimiter.Options{
+		Clock:         ratelimiter.NewManualClock(time.Unix(0, 0)),
+		SweepInterval: -1,
+	})
+	t.Cleanup(func() { lim.Close() })
+
+	rate := ratelimiter.Rate{Capacity: 1, Interval: time.Second}
+	mw, err := New(Config{
+		Limiter: lim,
+		Policy:  FixedRate(rate),
+		OnDenied: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// The middleware has already set Retry-After; a custom handler can
+			// read it and shape the body however it likes.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":"rate_limited","retryAfter":"`+w.Header().Get("Retry-After")+`"}`)
+		}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") }))
+
+	call(h, "1.1.1.1")            // consume the only token
+	rec := call(h, "1.1.1.1")     // this one is denied
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code %d, want 429", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type %q, want application/json from the custom handler", ct)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("middleware should still set Retry-After before delegating to OnDenied")
+	}
+	if !strings.Contains(rec.Body.String(), "rate_limited") {
+		t.Fatalf("body %q should be the custom JSON payload", rec.Body.String())
 	}
 }
 
