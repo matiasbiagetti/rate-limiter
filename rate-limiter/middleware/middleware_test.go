@@ -43,8 +43,11 @@ func call(h http.Handler, ip string) *httptest.ResponseRecorder {
 }
 
 func TestMiddleware_AllowsUpToLimitThenBlocks(t *testing.T) {
+	// Given a middleware stack with a 2-per-second limit
 	h := newStack(t, 2)
 
+	// When the same IP makes its first two requests
+	// Then both pass through to the handler (200, body "ok")
 	for i := 0; i < 2; i++ {
 		rec := call(h, "1.2.3.4")
 		if rec.Code != http.StatusOK {
@@ -55,6 +58,8 @@ func TestMiddleware_AllowsUpToLimitThenBlocks(t *testing.T) {
 		}
 	}
 
+	// When the same IP makes a third request
+	// Then it is rejected with 429, a Retry-After header, and 0 remaining
 	rec := call(h, "1.2.3.4")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("3rd request: code %d, want 429", rec.Code)
@@ -68,10 +73,13 @@ func TestMiddleware_AllowsUpToLimitThenBlocks(t *testing.T) {
 }
 
 func TestMiddleware_SetsRateLimitHeadersOnAllow(t *testing.T) {
+	// Given a stack with capacity 2
 	h := newStack(t, 2)
 
+	// When one request is made
 	rec := call(h, "9.9.9.9")
 
+	// Then the rate-limit headers report the limit and the remaining tokens
 	if got := rec.Header().Get("X-RateLimit-Limit"); got != "2" {
 		t.Fatalf("X-RateLimit-Limit = %q, want 2", got)
 	}
@@ -81,8 +89,11 @@ func TestMiddleware_SetsRateLimitHeadersOnAllow(t *testing.T) {
 }
 
 func TestMiddleware_LimitsPerClientIP(t *testing.T) {
+	// Given a stack with capacity 1
 	h := newStack(t, 1)
 
+	// When two different IPs each make one request, then the first IP repeats
+	// Then both first requests pass and the repeat is denied (per-IP buckets)
 	if rec := call(h, "10.0.0.1"); rec.Code != http.StatusOK {
 		t.Fatalf("client A first request: code %d, want 200", rec.Code)
 	}
@@ -95,6 +106,7 @@ func TestMiddleware_LimitsPerClientIP(t *testing.T) {
 }
 
 func TestMiddleware_OnDeniedCustomisesRejection(t *testing.T) {
+	// Given a stack with capacity 1 and a custom OnDenied that writes JSON
 	lim := ratelimiter.New(ratelimiter.Options{
 		Clock:         ratelimiter.NewManualClock(time.Unix(0, 0)),
 		SweepInterval: -1,
@@ -118,9 +130,11 @@ func TestMiddleware_OnDeniedCustomisesRejection(t *testing.T) {
 	}
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") }))
 
-	call(h, "1.1.1.1")            // consume the only token
-	rec := call(h, "1.1.1.1")     // this one is denied
+	// When the only token is consumed and a second request is denied
+	call(h, "1.1.1.1")        // consume the only token
+	rec := call(h, "1.1.1.1") // this one is denied
 
+	// Then the 429 carries the custom JSON body plus the Retry-After the middleware set
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("code %d, want 429", rec.Code)
 	}
@@ -136,12 +150,17 @@ func TestMiddleware_OnDeniedCustomisesRejection(t *testing.T) {
 }
 
 func TestNew_RequiresLimiterAndPolicy(t *testing.T) {
+	// Given configs that are missing a required field
 	rate := ratelimiter.Rate{Capacity: 1, Interval: time.Second}
 
+	// When New is called without a Limiter
+	// Then it returns ErrNoLimiter
 	if _, err := New(Config{Policy: FixedRate(rate)}); err != ErrNoLimiter {
 		t.Fatalf("nil Limiter: err = %v, want ErrNoLimiter", err)
 	}
 
+	// When New is called without a Policy
+	// Then it returns ErrNoPolicy
 	lim := ratelimiter.New(ratelimiter.Options{SweepInterval: -1})
 	t.Cleanup(func() { lim.Close() })
 	if _, err := New(Config{Limiter: lim}); err != ErrNoPolicy {

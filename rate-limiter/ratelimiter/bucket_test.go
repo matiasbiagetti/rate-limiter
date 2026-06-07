@@ -21,10 +21,13 @@ func drain(b *tokenBucket, t time.Time) {
 }
 
 func TestBucket_StartsFull(t *testing.T) {
+	// Given a fresh bucket (starts full at capacity 10)
 	b := newBucket(rate10PerSec(), base)
 
+	// When the first request arrives
 	d := b.allow(base)
 
+	// Then it is allowed and reports 9 tokens left
 	if !d.Allowed {
 		t.Fatal("a fresh bucket should allow the first request")
 	}
@@ -34,14 +37,17 @@ func TestBucket_StartsFull(t *testing.T) {
 }
 
 func TestBucket_ExhaustsThenDenies(t *testing.T) {
+	// Given a fresh bucket of capacity 10
 	b := newBucket(rate10PerSec(), base)
 
+	// When its 10 tokens are consumed at the same instant (no refill)
 	for i := 0; i < 10; i++ {
 		if d := b.allow(base); !d.Allowed {
 			t.Fatalf("request %d should be allowed within capacity 10", i+1)
 		}
 	}
 
+	// Then the 11th request is denied with 0 left and a 100ms Retry-After
 	d := b.allow(base)
 	if d.Allowed {
 		t.Fatal("the 11th request with no refill should be denied")
@@ -55,12 +61,14 @@ func TestBucket_ExhaustsThenDenies(t *testing.T) {
 }
 
 func TestBucket_RefillsProportionalToElapsedTime(t *testing.T) {
+	// Given a drained bucket (rate is 10/s = 1 token every 100ms)
 	b := newBucket(rate10PerSec(), base)
 	drain(b, base)
 
-	// 250ms later, exactly 2.5 tokens have accrued: two requests succeed, the
-	// third fails.
+	// When 250ms elapse, exactly 2.5 tokens accrue
 	at := base.Add(250 * time.Millisecond)
+
+	// Then the first two requests are allowed and the third is denied
 	if !b.allow(at).Allowed {
 		t.Fatal("1st request after 250ms should be allowed (2.5 tokens accrued)")
 	}
@@ -73,36 +81,42 @@ func TestBucket_RefillsProportionalToElapsedTime(t *testing.T) {
 }
 
 func TestBucket_NeverExceedsCapacity(t *testing.T) {
+	// Given a drained bucket
 	b := newBucket(rate10PerSec(), base)
 	drain(b, base)
 
-	// An arbitrarily long idle period must not accrue beyond capacity.
+	// When it sits idle for an hour and is then refilled
 	b.refill(base.Add(time.Hour))
 
+	// Then tokens are capped at capacity (10), not accrued beyond it
 	if b.tokens != 10 {
 		t.Fatalf("tokens = %v, want capped at capacity 10", b.tokens)
 	}
 }
 
 func TestBucket_RefillIsIdempotentAtSameInstant(t *testing.T) {
+	// Given a drained bucket
 	b := newBucket(rate10PerSec(), base)
 	drain(b, base)
 
-	b.refill(base) // no time has elapsed since the drain
+	// When refill is called again at the same instant (no time elapsed)
+	b.refill(base)
 
+	// Then no tokens are added (still 0)
 	if b.tokens != 0 {
 		t.Fatalf("tokens = %v, want 0 (no elapsed time means no refill)", b.tokens)
 	}
 }
 
 func TestBucket_RetryAfterReflectsPartialToken(t *testing.T) {
+	// Given a drained bucket
 	b := newBucket(rate10PerSec(), base)
 	drain(b, base)
 
-	// 50ms later only 0.5 tokens exist: still denied, and the caller should be
-	// told to retry after the remaining 50ms needed to reach a full token.
+	// When a request arrives 50ms later (only 0.5 tokens have accrued)
 	d := b.allow(base.Add(50 * time.Millisecond))
 
+	// Then it is denied, and Retry-After is the remaining 50ms to a full token
 	if d.Allowed {
 		t.Fatal("0.5 tokens must not satisfy a request")
 	}

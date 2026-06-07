@@ -25,7 +25,7 @@ func BenchmarkAllow_Serial(b *testing.B) {
 	}
 }
 
-// BenchmarkAllow_Parallel measures Allow under contention on a single hot key —
+// BenchmarkAllow_Parallel measures Allow under contention on a single hot key,
 // the worst case for one global mutex. Compare against -cpu values to see how
 // throughput holds up as cores are added.
 func BenchmarkAllow_Parallel(b *testing.B) {
