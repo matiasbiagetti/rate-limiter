@@ -167,3 +167,43 @@ func TestNew_RequiresLimiterAndPolicy(t *testing.T) {
 		t.Fatalf("nil Policy: err = %v, want ErrNoPolicy", err)
 	}
 }
+
+func TestClientIP_StripsPortAndHandlesAddressForms(t *testing.T) {
+	// Given RemoteAddr values in the different shapes net/http can produce
+	cases := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{"ipv4 with port", "1.2.3.4:5678", "1.2.3.4"},
+		{"ipv6 with port", "[::1]:1234", "::1"},
+		{"no port falls back to the raw value", "1.2.3.4", "1.2.3.4"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// When ClientIP reads the address
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.remoteAddr
+
+			// Then the port is stripped, or the raw value is returned when there is none
+			if got := ClientIP(req); got != tc.want {
+				t.Fatalf("ClientIP(%q) = %q, want %q", tc.remoteAddr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClientIP_IgnoresXForwardedFor(t *testing.T) {
+	// Given a request carrying a spoofable X-Forwarded-For header
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "1.2.3.4:5678"
+	req.Header.Set("X-Forwarded-For", "9.9.9.9")
+
+	// When ClientIP extracts the limiting key
+	// Then it uses RemoteAddr and ignores the header, so a client cannot spoof its key
+	// by setting X-Forwarded-For (trusting it needs deployment-specific config; see DESIGN.md).
+	if got := ClientIP(req); got != "1.2.3.4" {
+		t.Fatalf("ClientIP = %q, want 1.2.3.4 (X-Forwarded-For must be ignored to prevent key spoofing)", got)
+	}
+}
