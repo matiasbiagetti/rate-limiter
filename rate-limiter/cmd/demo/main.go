@@ -1,18 +1,6 @@
-// Command demo runs a small IOL-style market-data API wired with the
-// rate-limiter middleware, so the project runs out of the box:
-//
-//	go run ./cmd/demo                        # /api/* limited to 5 req/s per IP
-//	go run ./cmd/demo -burst 10 -interval 2s
-//
-// It demonstrates the two things the library is for:
-//
-//   - Per-route limit policies: the market-data endpoints under /api/ get a
-//     tight limit (they are the ones clients hammer), while browsing the index
-//     gets a lenient one — selected per request via the PolicyFunc seam.
-//   - A useful 429: a themed JSON body plus the X-RateLimit-* / Retry-After
-//     headers, via the middleware's OnDenied hook.
-//
-// The server uses read/write timeouts and shuts down gracefully on Ctrl-C.
+// Command demo runs a small IOL-style market-data API wired with the rate-limiter
+// middleware, so the project runs out of the box. See the README for what it shows
+// and the flags it accepts.
 package main
 
 import (
@@ -33,15 +21,15 @@ import (
 
 // quote is a mock market quote, just enough to make the demo concrete.
 type quote struct {
-	Symbol   string  `json:"simbolo"`
-	Name     string  `json:"nombre"`
-	Last     float64 `json:"ultimo"`
-	ChangePc float64 `json:"variacionPct"`
-	Currency string  `json:"moneda"`
+	Symbol   string  `json:"symbol"`
+	Name     string  `json:"name"`
+	Last     float64 `json:"last"`
+	ChangePc float64 `json:"changePct"`
+	Currency string  `json:"currency"`
 }
 
-// market is static mock data — a handful of well-known Argentine tickers and a
-// CEDEAR — so the endpoint returns something recognisable without any backend.
+// market is static mock data: a handful of well-known Argentine tickers and a
+// CEDEAR, so the endpoint returns something recognisable without any backend.
 var market = map[string]quote{
 	"GGAL": {"GGAL", "Grupo Financiero Galicia", 5230.0, 1.84, "ARS"},
 	"YPFD": {"YPFD", "YPF S.A.", 41250.0, -0.97, "ARS"},
@@ -57,32 +45,41 @@ func main() {
 	interval := flag.Duration("interval", time.Second, "time to refill the /api bucket to full")
 	flag.Parse()
 
-	apiRate := ratelimiter.Rate{Capacity: *burst, Interval: *interval}
-	browseRate := ratelimiter.Rate{Capacity: 30, Interval: time.Minute}
-	for _, r := range []ratelimiter.Rate{apiRate, browseRate} {
+	// Two distinct policies (rates), selected per request by route family.
+	rates := map[string]ratelimiter.Rate{
+		"api": {Capacity: *burst, Interval: *interval}, // strict: endpoints clients poll
+		"web": {Capacity: 30, Interval: time.Minute},   // lenient: browsing
+	}
+	for name, r := range rates {
 		if err := r.Validate(); err != nil {
-			log.Fatalf("invalid rate: %v", err)
+			log.Fatalf("invalid rate %q: %v", name, err)
 		}
 	}
 
-	// Eviction enabled: idle per-IP buckets are swept so memory stays bounded.
+	// group classifies a request into a rate-limit family.
+	group := func(r *http.Request) string {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			return "api"
+		}
+		return "web"
+	}
+
+	// Enable eviction so idle buckets don't grow memory without bound.
 	lim := ratelimiter.New(ratelimiter.Options{
 		SweepInterval: time.Minute,
 		IdleTTL:       10 * time.Minute,
 	})
 	defer lim.Close()
 
-	// Per-request policy: tight on the market-data API, lenient on browsing.
-	policy := func(r *http.Request) ratelimiter.Rate {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			return apiRate
-		}
-		return browseRate
-	}
-
 	limit, err := middleware.New(middleware.Config{
-		Limiter:  lim,
-		Policy:   policy,
+		Limiter: lim,
+		// Key by IP + route family so each family gets an independent bucket (see DESIGN.md).
+		Key: func(r *http.Request) string {
+			return middleware.ClientIP(r) + "|" + group(r)
+		},
+		Policy: func(r *http.Request) ratelimiter.Rate {
+			return rates[group(r)]
+		},
 		OnDenied: http.HandlerFunc(denied),
 	})
 	if err != nil {
@@ -91,12 +88,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/quotes", quotesHandler)
-	mux.HandleFunc("/", indexHandler(apiRate, browseRate))
+	mux.HandleFunc("/", indexHandler(rates["api"], rates["web"]))
 
 	srv := &http.Server{
 		Addr: *addr,
-		// Composition: log the outermost view of each request, then rate-limit,
-		// then route. The logger sees the final status, including 429s.
+		// Wrap order: log → rate-limit → route, so the log sees the final status (incl. 429s).
 		Handler:      logRequests(limit(mux)),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -104,8 +100,8 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("listening on %s — /api limited to %d per %s per client IP",
-			*addr, apiRate.Capacity, apiRate.Interval)
+		log.Printf("listening on %s; /api limited to %d per %s per client IP (browsing: %d per %s)",
+			*addr, rates["api"].Capacity, rates["api"].Interval, rates["web"].Capacity, rates["web"].Interval)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -138,7 +134,7 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-// logRequests logs one line per request — method, target, client IP, final
+// logRequests logs one line per request: method, target, client IP, final
 // status, and latency. It wraps (composes around) the rate limiter so the
 // status it logs already reflects any 429 the limiter produced.
 func logRequests(next http.Handler) http.Handler {
@@ -152,19 +148,19 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
-// quotesHandler returns a single quote when ?simbolo= is given, otherwise the
+// quotesHandler returns a single quote when ?symbol= is given, otherwise the
 // whole mock market. All responses also carry the X-RateLimit-* headers set by
 // the middleware.
 func quotesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if sym := strings.ToUpper(r.URL.Query().Get("simbolo")); sym != "" {
+	if sym := strings.ToUpper(r.URL.Query().Get("symbol")); sym != "" {
 		q, ok := market[sym]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error":   "simbolo_no_encontrado",
-				"simbolo": sym,
+				"error":  "symbol_not_found",
+				"symbol": sym,
 			})
 			return
 		}
@@ -186,10 +182,10 @@ func denied(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusTooManyRequests)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":             "limite_de_solicitudes",
-		"mensaje":           "Demasiadas solicitudes. Reintentá más tarde.",
+		"error":             "rate_limited",
+		"message":           "Too many requests, please retry later.",
 		"retryAfterSeconds": w.Header().Get("Retry-After"),
-		"limite":            w.Header().Get("X-RateLimit-Limit"),
+		"limit":             w.Header().Get("X-RateLimit-Limit"),
 	})
 }
 
@@ -198,12 +194,12 @@ func denied(w http.ResponseWriter, _ *http.Request) {
 func indexHandler(api, browse ratelimiter.Rate) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, `IOL-style market data — rate limiter demo
+		fmt.Fprintf(w, `IOL-style market data (rate limiter demo)
 
 Endpoints:
   GET /                      this page            (limit: %d per %s per IP)
   GET /api/quotes            all quotes           (limit: %d per %s per IP)
-  GET /api/quotes?simbolo=GGAL   one quote
+  GET /api/quotes?symbol=GGAL   one quote
 
 Every response carries:
   X-RateLimit-Limit       capacity for this route
@@ -212,7 +208,7 @@ On 429 it also sends:
   Retry-After             seconds until a token frees up
 
 Try it:
-  curl -i "http://localhost:8080/api/quotes?simbolo=GGAL"
+  curl -i "http://localhost:8080/api/quotes?symbol=GGAL"
   (send several /api/quotes requests quickly to trip the limit and see the 429)
 `,
 			browse.Capacity, browse.Interval, api.Capacity, api.Interval)
