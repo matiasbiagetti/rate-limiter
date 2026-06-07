@@ -4,13 +4,13 @@ import "time"
 
 // tokenBucket is the per-key state of the token-bucket algorithm. Tokens are
 // refilled lazily on access from the time elapsed since lastSeen, so there is
-// no background goroutine or timer per key — only arithmetic when a key is hit.
+// no background goroutine or timer per key, only arithmetic when a key is hit.
 //
 // tokenBucket is not safe for concurrent use; the owning Limiter serialises
 // access to it under its mutex.
 type tokenBucket struct {
 	tokens   float64   // current whole/fractional tokens available
-	lastSeen time.Time // last time tokens were refilled (also drives eviction)
+	lastSeen time.Time // last time tokens were refilled
 	rate     Rate      // the limit this bucket is currently configured for
 }
 
@@ -33,8 +33,7 @@ func (b *tokenBucket) refill(now time.Time) {
 	if elapsed <= 0 {
 		return
 	}
-	// Tokens accrue at Capacity per Interval. Multiply before dividing to keep
-	// full float precision; elapsed and Interval are both nanosecond counts.
+	// Multiply before dividing to avoid float64 precision loss.
 	b.tokens += float64(elapsed) * float64(b.rate.Capacity) / float64(b.rate.Interval)
 	if capacity := float64(b.rate.Capacity); b.tokens > capacity {
 		b.tokens = capacity
@@ -53,8 +52,7 @@ func (b *tokenBucket) allow(now time.Time) Decision {
 		return Decision{Allowed: true, Remaining: int(b.tokens)}
 	}
 
-	// Time for the missing fraction of a token to refill: needed * Interval /
-	// Capacity (multiply before divide, as in refill).
+	// Time until the next whole token accrues (multiply before divide, as in refill).
 	needed := 1 - b.tokens
 	retryAfter := time.Duration(needed * float64(b.rate.Interval) / float64(b.rate.Capacity))
 	return Decision{Allowed: false, Remaining: 0, RetryAfter: retryAfter}

@@ -13,8 +13,8 @@ import (
 	"github.com/biagettimati/rate-limiter/ratelimiter"
 )
 
-// KeyFunc extracts the rate-limit key from a request — typically the client IP
-// or an API token. Injecting it means the limiting dimension is not hardcoded.
+// KeyFunc extracts the rate-limit key from a request (typically the client IP
+// or an API token). Injecting it means the limiting dimension is not hardcoded.
 type KeyFunc func(*http.Request) string
 
 // PolicyFunc selects which Rate applies to a request. This is the seam for
@@ -89,8 +89,8 @@ func writeDefaultDenied(w http.ResponseWriter, _ *http.Request) {
 }
 
 // retryAfterSeconds converts the Decision's RetryAfter to whole seconds, rounded
-// up, with a floor of 1 — the Retry-After header is expressed in seconds and a
-// denied caller should always be told to wait at least one.
+// up, with a floor of 1, because the Retry-After header is expressed in seconds
+// and a denied caller should always be told to wait at least one.
 func retryAfterSeconds(d ratelimiter.Decision) int {
 	secs := int(math.Ceil(d.RetryAfter.Seconds()))
 	if secs < 1 {
@@ -104,8 +104,8 @@ func retryAfterSeconds(d ratelimiter.Decision) int {
 //
 // Note: behind a reverse proxy every request shares the proxy's IP, so a real
 // deployment would parse a trusted X-Forwarded-For. That is intentionally left
-// out here — blindly trusting that header lets clients spoof their key, so it
-// needs deployment-specific trust configuration. See DESIGN.md.
+// out here, because blindly trusting that header lets clients spoof their key,
+// so it needs deployment-specific trust configuration. See DESIGN.md.
 func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -114,7 +114,7 @@ func ClientIP(r *http.Request) string {
 	return host
 }
 
-// FixedRate returns a PolicyFunc that applies the same rate to every request —
+// FixedRate returns a PolicyFunc that applies the same rate to every request:
 // the common case of a single global limit.
 func FixedRate(rate ratelimiter.Rate) PolicyFunc {
 	return func(*http.Request) ratelimiter.Rate { return rate }

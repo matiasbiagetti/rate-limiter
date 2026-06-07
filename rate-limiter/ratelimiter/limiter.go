@@ -27,7 +27,7 @@ type Decision struct {
 //
 // Concurrency: a single mutex guards the whole bucket map and the per-bucket
 // read-modify-write. Holding it across the entire bucket.allow call is what
-// makes "refill, check, consume" atomic — the operation that, if interleaved,
+// makes "refill, check, consume" atomic: the operation that, if interleaved,
 // would let two requests double-spend the same token. Every Allow mutates, so a
 // plain sync.Mutex is used rather than an RWMutex (there are no pure readers).
 // Sharding the map by key hash is the documented scaling path if benchmarks
@@ -68,10 +68,8 @@ func New(opts Options) *Limiter {
 // new capacity. An invalid rate (non-positive capacity or interval) fails
 // closed: the request is denied and no bucket is created.
 func (l *Limiter) Allow(key string, rate Rate) Decision {
-	// Defensive backstop: an invalid rate must never silently disable limiting.
-	// A zero Interval would otherwise divide to +Inf tokens and let everything
-	// through, so we fail closed and store no bucket. Supplying a valid Rate
-	// remains the caller's responsibility (see Rate.Validate).
+	// Fail closed on an invalid rate: deny and store no bucket (a zero Interval
+	// would otherwise divide to +Inf and disable the limiter). Details in DESIGN.md.
 	if rate.Validate() != nil {
 		return Decision{Allowed: false}
 	}
